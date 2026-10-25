@@ -1,0 +1,15 @@
+{
+  "type": "client",
+  "name": "set_task_draft",
+  "description": "Replace the current UNSAVED task draft with a complete title. Call again for each correction. This does not save a task; only the human's Confirm button saves.",
+  "expects_response": true,
+  "execution_mode": "immediate",
+  "response_timeout_secs": 10,
+  "parameters": {
+    "type": "object",
+    "required": ["title"],
+    "properties": {
+      "title": {"type": "string", "description": "The full corrected task title, 1–200 characters, including any previous details that remain relevant."}
+    }
+  }
+}

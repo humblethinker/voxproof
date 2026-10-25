@@ -1,0 +1,10 @@
+title = "VoiceTasks secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "elevenlabs-api-key"
+description = "ElevenLabs API key"
+regex = '''\bsk_[a-fA-F0-9]{32,}\b'''
+keywords = ["sk_"]
