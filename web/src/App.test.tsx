@@ -6,7 +6,7 @@ import { App } from './App';
 
 const sdk = vi.hoisted(() => ({ startSession: vi.fn(), endSession: vi.fn() }));
 vi.mock('@elevenlabs/react', () => ({ useConversation: () => ({ ...sdk, status: 'disconnected', isSpeaking: false }) }));
-const savedTask = { id: 'task-1', title: 'Buy groceries and coffee', created_at: '2026-10-24T00:00:00Z' };
+const savedTask = { id: 'task-1', title: 'Buy groceries and coffee', created_at: '2026-10-24T00:00:00Z', completed: false };
 let posts: Array<{ title: string; request_id: string }>;
 let failSave: boolean;
 
@@ -70,4 +70,49 @@ it('retries an ambiguous failed save with exactly the same title and request ID'
   expect(posts).toHaveLength(2);
   expect(posts[1]).toEqual(posts[0]);
   expect(screen.getAllByRole('listitem')).toHaveLength(1);
+});
+
+it('completes, reloads and undoes the same task without creating a new task', async () => {
+  let stored = { ...savedTask };
+  const updates: unknown[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (_url: string, options: RequestInit) => {
+    if (options.method === 'PATCH') {
+      const change = JSON.parse(options.body as string);
+      updates.push(change); stored = { ...stored, ...change };
+      return { ok: true, json: async () => ({ ...stored }) };
+    }
+    return { ok: true, json: async () => [{ ...stored }] };
+  }));
+  const first = render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: `Complete: ${savedTask.title}` }));
+  await screen.findByRole('button', { name: `Undo completion: ${savedTask.title}`, pressed: true });
+  first.unmount(); render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: `Undo completion: ${savedTask.title}` }));
+  await screen.findByRole('button', { name: `Complete: ${savedTask.title}`, pressed: false });
+  expect(updates).toEqual([{ completed: true }, { completed: false }]);
+  expect(screen.getAllByRole('listitem')).toHaveLength(1);
+  expect(posts).toHaveLength(0);
+});
+
+it('locks an in-flight completion and safely retries a lost response', async () => {
+  const updates: unknown[] = [];
+  let rejectRequest: (reason: Error) => void = () => {};
+  vi.stubGlobal('fetch', vi.fn(async (_url: string, options: RequestInit) => {
+    if (options.method !== 'PATCH') return { ok: true, json: async () => [savedTask] };
+    const change = JSON.parse(options.body as string); updates.push(change);
+    if (updates.length === 1) return new Promise((_resolve, reject) => { rejectRequest = reject; });
+    return { ok: true, json: async () => ({ ...savedTask, ...change }) };
+  }));
+  render(<App />);
+  const complete = await screen.findByRole('button', { name: `Complete: ${savedTask.title}` });
+  fireEvent.click(complete); fireEvent.click(complete);
+  expect((complete as HTMLButtonElement).disabled).toBe(true);
+  expect(updates).toHaveLength(1);
+  await act(async () => { rejectRequest(new Error('Response lost after commit')); });
+  await screen.findByRole('alert');
+  expect(complete.getAttribute('aria-pressed')).toBe('false');
+  fireEvent.click(complete);
+  await screen.findByRole('button', { name: `Undo completion: ${savedTask.title}`, pressed: true });
+  expect(updates).toEqual([{ completed: true }, { completed: true }]);
+  expect(screen.queryByRole('alert')).toBeNull();
 });

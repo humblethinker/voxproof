@@ -11,7 +11,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, StrictBool, field_validator
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / '.env')
@@ -31,6 +31,15 @@ class TaskInput(BaseModel):
         return title
 
 
+class TaskStatusInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    completed: StrictBool
+
+
+def task_record(row):
+    return {**dict(row), 'completed': bool(row['completed'])}
+
+
 def connect(path: Path):
     db = sqlite3.connect(path, timeout=10)
     db.row_factory = sqlite3.Row
@@ -40,10 +49,15 @@ def connect(path: Path):
 def initialize(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(connect(path)) as db, db:
+        # Serialize startup migrations, including when multiple workers start.
+        db.execute('BEGIN IMMEDIATE')
         db.execute('''CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL,
-            request_id TEXT NOT NULL UNIQUE
+            request_id TEXT NOT NULL UNIQUE,
+            completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
         )''')
+        if 'completed' not in {row['name'] for row in db.execute('PRAGMA table_info(tasks)')}:
+            db.execute('ALTER TABLE tasks ADD COLUMN completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))')
 
 
 async def signed_url() -> str:
@@ -96,7 +110,7 @@ def create_app(db_path: Path | None = None, session_provider=signed_url):
     def list_tasks(response: Response):
         response.headers['Cache-Control'] = 'no-store'
         with closing(connect(path)) as db:
-            return [dict(row) for row in db.execute('SELECT * FROM tasks ORDER BY created_at DESC, id DESC')]
+            return [task_record(row) for row in db.execute('SELECT * FROM tasks ORDER BY created_at DESC, id DESC')]
 
     @app.post('/api/tasks')
     def save_task(task: TaskInput, response: Response, x_voicetasks: str | None = Header(default=None)):
@@ -108,7 +122,20 @@ def create_app(db_path: Path | None = None, session_provider=signed_url):
             if row['title'] != task.title:
                 raise HTTPException(409, 'This request already saved a different title. Reload to see the saved task.')
             response.status_code = 201 if inserted else 200
-            return dict(row)
+            return task_record(row)
+
+    @app.patch('/api/tasks/{task_id}')
+    def set_task_status(task_id: UUID, status: TaskStatusInput, response: Response, x_voicetasks: str | None = Header(default=None)):
+        require_local_client(x_voicetasks)
+        response.headers['Cache-Control'] = 'no-store'
+        with closing(connect(path)) as db, db:
+            # Set the requested state instead of toggling it, so retries are safe.
+            changed = db.execute('UPDATE tasks SET completed = ? WHERE id = ?',
+                                 (int(status.completed), str(task_id))).rowcount
+            if not changed:
+                raise HTTPException(404, 'Task not found. Refresh the list and try again.')
+            row = db.execute('SELECT * FROM tasks WHERE id = ?', (str(task_id),)).fetchone()
+            return task_record(row)
 
     return app
 

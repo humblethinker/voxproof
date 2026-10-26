@@ -1,11 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
+import sqlite3
 
 import httpx
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 import pytest
-from backend.app import create_app, signed_url
+from backend.app import create_app, initialize, signed_url
 
 HEADERS = {'X-VoiceTasks': '1'}
 
@@ -81,3 +82,52 @@ def test_vendor_error_is_sanitized(monkeypatch):
         asyncio.run(signed_url())
     assert 'secret-key' not in str(exc.value)
     assert exc.value.status_code == 502
+
+
+def test_completion_and_undo_persist_and_retry_safely(tmp_path):
+    path = tmp_path / 'tasks.sqlite3'
+    body = payload()
+    with TestClient(create_app(path)) as client:
+        task = client.post('/api/tasks', json=body, headers=HEADERS).json()
+        assert task['completed'] is False
+        endpoint = f"/api/tasks/{task['id']}"
+        for _ in range(2):
+            result = client.patch(endpoint, json={'completed': True}, headers=HEADERS)
+            assert result.status_code == 200
+            assert result.json() == {**task, 'completed': True}
+        # A late retry of the original save must not reset completion.
+        assert client.post('/api/tasks', json=body, headers=HEADERS).json()['completed'] is True
+    with TestClient(create_app(path)) as client:
+        assert client.get('/api/tasks').json() == [{**task, 'completed': True}]
+        for _ in range(2):
+            assert client.patch(endpoint, json={'completed': False}, headers=HEADERS).json() == task
+    with TestClient(create_app(path)) as client:
+        assert client.get('/api/tasks').json() == [task]
+
+
+def test_migrates_existing_database_without_losing_tasks(tmp_path):
+    path = tmp_path / 'tasks.sqlite3'
+    task_id, request_id = str(uuid4()), str(uuid4())
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE)')
+        db.execute('INSERT INTO tasks VALUES (?, ?, ?, ?)', (task_id, 'Existing task', '2026-10-24T00:00:00Z', request_id))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(initialize, [path, path]))
+    with TestClient(create_app(path)) as client:
+        task = client.get('/api/tasks').json()[0]
+        assert task == {'id': task_id, 'title': 'Existing task', 'created_at': '2026-10-24T00:00:00Z', 'request_id': request_id, 'completed': False}
+        assert client.patch(f'/api/tasks/{task_id}', json={'completed': True}, headers=HEADERS).status_code == 200
+    with TestClient(create_app(path)) as client:
+        assert client.get('/api/tasks').json()[0]['completed'] is True
+
+
+def test_completion_requires_valid_boolean_task_and_local_header(tmp_path):
+    with TestClient(create_app(tmp_path / 'tasks.sqlite3')) as client:
+        task = client.post('/api/tasks', json=payload(), headers=HEADERS).json()
+        endpoint = f"/api/tasks/{task['id']}"
+        assert client.patch(endpoint, json={'completed': True}).status_code == 403
+        for body in [{}, {'completed': 'false'}, {'completed': 1}, {'completed': None}, {'completed': True, 'title': 'Changed'}]:
+            assert client.patch(endpoint, json=body, headers=HEADERS).status_code == 422
+        assert client.patch('/api/tasks/bad-id', json={'completed': True}, headers=HEADERS).status_code == 422
+        assert client.patch(f'/api/tasks/{uuid4()}', json={'completed': True}, headers=HEADERS).status_code == 404
+        assert client.get('/api/tasks').json() == [task]

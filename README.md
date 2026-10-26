@@ -15,6 +15,7 @@ This repository keeps the **VoxProof** name. Its first release is **VoiceTasks**
 3. Interrupt: **“Actually, buy groceries and coffee.”** The same draft changes.
 4. Click **Confirm & save**. The conversation stops and one task is saved.
 5. Refresh the page: the task is still there.
+6. Click **Done** beside a saved task to mark it complete. Click **Undo** to reopen it. Both changes survive refreshes; completed tasks stay visible.
 
 **Cancel** discards an unconfirmed draft. **Stop conversation** ends the microphone session and keeps the draft for review. Voice alone cannot confirm a task.
 
@@ -84,6 +85,8 @@ npm run build
 ```
 
 Tests cover persistence across app restarts, concurrent duplicate saves, conflicting retries, validation, session errors, corrections, cancellation, stale tool callbacks, double clicks, and retrying a lost save response. Browser component tests mock the voice SDK and HTTP layer; they do not exercise a physical microphone.
+
+Completion tests also cover upgrading existing databases without losing tasks, completing and undoing after refresh, repeated status requests, and failed responses. Existing tasks start as incomplete on upgrade. Completion is controlled by the task-list buttons; the voice agent still only updates drafts.
 
 An optional **live audio check** uses macOS `say` and `afconvert` to stream synthetic speech to the real agent. It consumes ElevenLabs credits, never opens the microphone, and saves no tasks:
 
