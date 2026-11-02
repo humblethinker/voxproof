@@ -3,12 +3,12 @@ import { useConversation } from '@elevenlabs/react';
 import { DraftController } from './draft';
 import './style.css';
 
-type Task = { id: string; title: string; created_at: string; request_id: string };
+type Task = { id: string; title: string; created_at: string; request_id: string; completed: boolean };
 type Message = { role: string; text: string };
 
-async function api<T>(path: string, body?: unknown): Promise<T> {
+async function api<T>(path: string, body?: unknown, method = body ? 'POST' : 'GET'): Promise<T> {
   const response = await fetch(`/api/${path}`, {
-    method: body ? 'POST' : 'GET',
+    method,
     headers: { 'X-VoiceTasks': '1', ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(20000),
@@ -30,6 +30,9 @@ export function App() {
   const [notice, setNotice] = useState('');
   const [starting, setStarting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [updatingTasks, setUpdatingTasks] = useState<Set<string>>(new Set());
+  const [taskErrors, setTaskErrors] = useState<Record<string, string>>({});
+  const taskRequests = useRef(new Set<string>());
   const inFlight = useRef(false);
   const attempt = useRef(0);
   const conversation = useConversation();
@@ -120,6 +123,24 @@ export function App() {
     stop(); controller.cancel(); redraw(); setError(''); setNotice('Draft discarded. Nothing saved.');
   }
 
+  async function setCompleted(task: Task) {
+    if (taskRequests.current.has(task.id)) return;
+    taskRequests.current.add(task.id);
+    setUpdatingTasks(new Set(taskRequests.current));
+    setTaskErrors(previous => ({ ...previous, [task.id]: '' }));
+    try {
+      const updated = await api<Task>(`tasks/${task.id}`, { completed: !task.completed }, 'PATCH');
+      setTasks(previous => previous.map(item => item.id === task.id ? updated : item));
+    } catch {
+      // Keep the last confirmed state. Retrying sends the same desired value,
+      // even if the server applied it but its response was lost.
+      setTaskErrors(previous => ({ ...previous, [task.id]: 'Could not confirm the change. Try again, or refresh to check its status.' }));
+    } finally {
+      taskRequests.current.delete(task.id);
+      setUpdatingTasks(new Set(taskRequests.current));
+    }
+  }
+
   const status = starting || conversation.status === 'connecting' ? 'Connecting…'
     : conversation.status === 'connected' ? (conversation.isSpeaking ? 'Speaking · you can interrupt' : 'Listening to you') : 'Ready when you are';
 
@@ -149,7 +170,17 @@ export function App() {
     {error && <p className="alert" role="alert">{error}</p>}
     {notice && <p className="notice" role="status">{notice}</p>}
     <section className="saved"><div className="saved-heading"><h2>Saved tasks <span>{tasks.length}</span></h2><p>Kept on this computer.</p></div>
-      {!loaded ? <p className="empty-list">Loading your tasks…</p> : tasks.length === 0 ? <p className="empty-list">A clear list. Start with one thing.</p> : <ul>{tasks.map(task => <li key={task.id}><span className="task-dot" aria-hidden="true" />{task.title}<time dateTime={task.created_at}>{new Date(task.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</time></li>)}</ul>}
+      {!loaded ? <p className="empty-list">Loading your tasks…</p> : tasks.length === 0 ? <p className="empty-list">A clear list. Start with one thing.</p> : <ul>{tasks.map(task => <li key={task.id} className={task.completed ? 'task completed' : 'task'}>
+        <div className="task-row">
+          <button className="task-toggle" aria-pressed={task.completed} aria-label={`${task.completed ? 'Undo completion' : 'Complete'}: ${task.title}`} disabled={updatingTasks.has(task.id)} onClick={() => setCompleted(task)}>
+            <span className="task-dot" aria-hidden="true">{task.completed ? '✓' : ''}</span>
+            <span>{updatingTasks.has(task.id) ? 'Saving…' : task.completed ? 'Undo' : 'Done'}</span>
+          </button>
+          <span className="task-title">{task.title}</span>
+          <time dateTime={task.created_at}>{new Date(task.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</time>
+        </div>
+        {taskErrors[task.id] && <p className="task-error" role="alert">{taskErrors[task.id]}</p>}
+      </li>)}</ul>}
     </section>
     <footer>Microphone audio goes to ElevenLabs during a conversation. Tasks stay in your local database.</footer>
   </main>;
